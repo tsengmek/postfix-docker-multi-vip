@@ -1,11 +1,11 @@
-FROM rockylinux:9
+FROM registry.access.redhat.com/ubi9/ubi:latest
 
 LABEL maintainer="Infrastructure Team"
 LABEL description="Production HA Postfix Multi-VIP Relay + OpenDKIM + JSON Log Consolidator for RHEL 9"
 
-# Enable EPEL & CRB for opendkim and opendkim-tools on Rocky/RHEL 9
-RUN dnf install -y epel-release && \
-    dnf config-manager --set-enabled crb || true && \
+# Enable EPEL & CRB for opendkim and opendkim-tools on RHEL / UBI 9
+RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
+    (dnf config-manager --set-enabled ubi-9-codeready-builder || dnf config-manager --set-enabled crb || true) && \
     dnf install -y \
         postfix \
         postfix-pcre \
@@ -21,7 +21,7 @@ RUN dnf install -y epel-release && \
         nmap-ncat \
         procps-ng \
         tzdata \
-         bind-utils && \
+        bind-utils && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
