@@ -1,0 +1,14 @@
+# ==============================================================================
+# Allowed Sender Emails (/etc/postfix/allowed_senders)
+# Copy this file to config/allowed_senders to add allowed senders in addition
+# to the ALLOWED_SENDERS variable in .env.
+# ==============================================================================
+#
+# Syntax:
+#   sender@company.com      OK
+#
+# Examples:
+otp@company.com             OK
+notification@company.com    OK
+# alert@company.com         OK
+# noreply@company.com       OK

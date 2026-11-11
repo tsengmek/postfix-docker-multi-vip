@@ -1,0 +1,33 @@
+services:
+  postfix-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: company/postfix-ha-relay:el9
+    container_name: postfix-relay
+    restart: unless-stopped
+    # Host network mode is required on RHEL 9 so Postfix can bind directly
+    # to the 1 Inbound VIP and 5 Outbound Keepalived NAT VIPs (smtp_bind_address).
+    network_mode: "host"
+    env_file:
+      - .env
+    volumes:
+      # Persistent logs: /var/log/maillog & /var/log/postfix-consolidate.log (+ rotated archives)
+      - ./logs:/var/log/mailserver:Z
+      # Persistent OpenDKIM keys for company.com
+      - ./dkim:/etc/opendkim/keys:Z
+      # Persistent Postfix queue spool so in-flight messages survive container restarts
+      - ./spool:/var/spool/postfix:Z
+      # Custom static config overrides (transport, allowed_senders, sender_vip_map, header_checks)
+      - ./config:/etc/postfix/custom:ro,Z
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/local/bin/healthcheck.sh"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

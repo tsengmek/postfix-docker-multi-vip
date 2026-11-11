@@ -1,0 +1,25 @@
+# ==============================================================================
+# Destination Domain Transport Map (/etc/postfix/transport)
+# Copy this file to config/transport (or set TRANSPORT_MAPS in .env) to forward
+# specific destination domains to specific MX / SMTP relay servers.
+# ==============================================================================
+#
+# Syntax:
+#   destination-domain      transport:[nexthop]:port
+#
+# Note: Putting brackets [ ] around the nexthop hostname/IP disables MX lookups
+# and connects directly to that host/IP. Omit brackets to perform MX lookup.
+#
+# Examples:
+#
+# 1. Forward all mail for partner.com directly to a specific SMTP server on port 25:
+# partner.com               smtp:[203.0.113.55]:25
+#
+# 2. Forward internal corporate domain to internal Exchange/Zimbra relay on port 2525:
+# internal.company.com      smtp:[10.20.30.10]:2525
+#
+# 3. Force a specific destination domain to use Outbound VIP 1 AND a specific MX server:
+# vip-partner.org           smtp_vip1:[mx.vip-partner.org]:25
+#
+# 4. Force a specific destination domain (e.g. outlook.com) to use Outbound VIP 3:
+# outlook.com               smtp_vip3:

@@ -1,0 +1,21 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Secrets and environment variables
+.env
+
+# DKIM private and public keys
+dkim/
+
+# Postfix mail queue and runtime spools
+spool/
+
+# Service logs
+logs/
+
+# Temporary and OS files
+.DS_Store
+*.swp
+*~
+

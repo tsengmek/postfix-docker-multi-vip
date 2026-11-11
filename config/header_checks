@@ -1,0 +1,12 @@
+# ==============================================================================
+# Postfix Header Checks Reference (Auto-generated into /etc/postfix/header_checks
+# by entrypoint.sh based on .env LOG_HEADERS_REGEX & STRIP_INTERNAL_RECEIVED).
+# You can place additional custom rules in config/header_checks.extra
+# ==============================================================================
+
+# 1. Strip internal RFC1918 application server Received headers before outbound relay
+/^Received:\s+from\s+.*\((?:.*?\s+)?\[(?:10\.\d+\.\d+\.\d+|127\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+)\]\)/ IGNORE
+
+# 2. Log email headers with Queue-ID via cleanup INFO action (does not alter message)
+# Captured by postfix-log-consolidator.py into /var/log/postfix-consolidate.log
+/^(Subject|From|To|Cc|Date|Message-ID|Reply-To|X-[A-Za-z0-9-]+):/ INFO
