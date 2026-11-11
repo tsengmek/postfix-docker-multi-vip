@@ -228,8 +228,22 @@ cat > /etc/postfix/milter_header_checks <<'EOF'
 EOF
 
 # ==============================================================================
-# 7. CONFIGURE POSTFIX master.cf (5 OUTBOUND NAT VIP TRANSPORTS)
+# 7. CONFIGURE POSTFIX master.cf (INBOUND PORT & 5 OUTBOUND NAT VIP TRANSPORTS)
 # ==============================================================================
+SMTP_INBOUND_PORT="${SMTP_INBOUND_PORT:-25}"
+log_info "Configuring Inbound SMTP port (${SMTP_INBOUND_PORT}) in /etc/postfix/master.cf..."
+
+if [ "${SMTP_INBOUND_PORT}" != "25" ] && [ "${SMTP_INBOUND_PORT}" != "smtp" ]; then
+    # Replace active 'smtp inet ... smtpd' or existing custom port '<port> inet ... smtpd'
+    if grep -q -E "^(smtp|[0-9]+)[[:space:]]+inet.*smtpd" /etc/postfix/master.cf; then
+        sed -i -E "s/^(smtp|[0-9]+)([[:space:]]+inet[[:space:]]+.*smtpd)/${SMTP_INBOUND_PORT}\2/" /etc/postfix/master.cf
+    else
+        echo "${SMTP_INBOUND_PORT} inet n - n - - smtpd" >> /etc/postfix/master.cf
+    fi
+else
+    sed -i -E "s/^[0-9]+([[:space:]]+inet[[:space:]]+.*smtpd)/smtp\1/" /etc/postfix/master.cf
+fi
+
 log_info "Configuring 5 Outbound VIP transports (smtp_vip1..smtp_vip5) in /etc/postfix/master.cf..."
 
 # Remove any previously appended block before adding fresh block
@@ -420,13 +434,13 @@ fi
 # ==============================================================================
 # 10. CREATE HEALTHCHECK SCRIPT
 # ==============================================================================
-cat > /usr/local/bin/healthcheck.sh <<'EOF'
+cat > /usr/local/bin/healthcheck.sh <<EOF
 #!/usr/bin/env bash
 set -e
 # 1. Verify Postfix master process is running
 /usr/sbin/postfix status >/dev/null 2>&1
-# 2. Verify SMTP port 25 is listening locally
-nc -z -w 3 127.0.0.1 25 >/dev/null 2>&1
+# 2. Verify SMTP port (${SMTP_INBOUND_PORT}) is listening locally
+nc -z -w 3 127.0.0.1 \${SMTP_INBOUND_PORT:-${SMTP_INBOUND_PORT}} >/dev/null 2>&1
 # 3. Verify JSON log consolidator is running
 pgrep -f "postfix-log-consolidator.py" >/dev/null 2>&1
 EOF

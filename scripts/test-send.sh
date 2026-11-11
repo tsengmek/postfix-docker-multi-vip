@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SMTP_HOST="${1:-127.0.0.1}"
-SMTP_PORT="${2:-25}"
+SMTP_PORT="${2:-${SMTP_INBOUND_PORT:-25}}"
 RECIPIENT="${3:-test-recipient@example.com}"
 ALLOWED_SENDER="${4:-otp@company.com}"
 BLOCKED_SENDER="unauthorized@company.com"

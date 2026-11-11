@@ -41,6 +41,6 @@ RUN chmod +x /entrypoint.sh \
              /usr/local/bin/postfix-log-consolidator.py \
              /usr/local/bin/generate-dkim.sh
 
-EXPOSE 25 587
+EXPOSE 25 587 2525
 
 ENTRYPOINT ["/entrypoint.sh"]
