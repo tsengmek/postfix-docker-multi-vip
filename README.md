@@ -22,6 +22,9 @@ Built for high-deliverability **OTP** and transactional emails to **Google (Gmai
    - `/var/log/maillog` (persisted on host at `./logs/maillog`): Raw Postfix & OpenDKIM log.
    - `/var/log/postfix-consolidate.log` (persisted on host at `./logs/postfix-consolidate.log`): Consolidates all log events and **email headers** (`Subject`, `From`, `To`, `Date`, `Message-ID`, `X-*`) for each `queue-id` into a **single-line JSON record**.
    - **Daily Rotation**: Rotated daily via `logrotate` with configurable retention (`LOG_RETENTION_DAYS=30`).
+6. **Full Inbound & Outbound TLS / STARTTLS**:
+   - **Inbound (`smtpd_tls_security_level=may`)**: Full STARTTLS support for client mail submissions. Automatic self-signed SAN certificate generation fallback (`AUTO_GENERATE_TLS_CERT=true`) or custom SSL certificates mounted from `./certs/` (`tls.crt`, `tls.key`).
+   - **Outbound (`smtp_tls_security_level=may`)**: Opportunistic STARTTLS to external providers (Google, Yahoo, Outlook).
 
 ---
 
@@ -101,7 +104,7 @@ Built for high-deliverability **OTP** and transactional emails to **Google (Gmai
 
 2. **Build and Start with Docker Compose**:
    ```bash
-   mkdir -p logs dkim spool
+   mkdir -p logs dkim spool certs
    docker compose up -d --build
    ```
 
@@ -112,6 +115,44 @@ Built for high-deliverability **OTP** and transactional emails to **Google (Gmai
    cat dkim/company.com/mail.txt
    ```
    Copy the generated key from `./dkim/company.com/` to the Backup RHEL 9 node so both nodes sign with the identical DKIM private key.
+
+---
+
+## Inbound TLS & STARTTLS Support
+
+Postfix supports inbound opportunistic encryption via **STARTTLS** on port 25, 587, or custom ports (e.g., 2525).
+
+### 1. Zero-Touch Automatic Certificate Generation
+If no certificates are found in `./certs/`, the container automatically generates a 2048-bit RSA self-signed TLS certificate with Subject Alternative Names (SAN) for:
+- `MYHOSTNAME` (e.g., `mail.company.com`)
+- `MAIL_DOMAIN` (e.g., `company.com`)
+- `*.MAIL_DOMAIN` (wildcard)
+- `localhost` and `127.0.0.1`
+- `INBOUND_VIP` (if defined)
+
+The generated certificate and key persist in `./certs/tls.crt` and `./certs/tls.key` across container restarts.
+
+### 2. Using Custom or Production SSL Certificates (Let's Encrypt / Corporate CA)
+Simply copy your PEM certificate and private key into `./certs/`:
+```bash
+cp /path/to/fullchain.pem certs/tls.crt
+cp /path/to/privkey.pem certs/tls.key
+chmod 0644 certs/tls.crt
+chmod 0640 certs/tls.key
+docker compose restart postfix-relay
+```
+
+### 3. Testing STARTTLS Verification
+You can verify STARTTLS advertisement, handshake, and encrypted mail delivery using the included test script:
+```bash
+# Syntax: ./scripts/test-starttls.sh <HOST> <PORT> [RECIPIENT] [SENDER]
+./scripts/test-starttls.sh 127.0.0.1 2525 test@example.com otp@company.com
+```
+
+Or manually with OpenSSL:
+```bash
+openssl s_client -starttls smtp -crlf -connect 127.0.0.1:2525
+```
 
 ---
 

@@ -14,6 +14,7 @@ RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.n
         cyrus-sasl \
         cyrus-sasl-plain \
         ca-certificates \
+        openssl \
         python3 \
         logrotate \
         cronie \
@@ -29,17 +30,20 @@ RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.n
 RUN mkdir -p /var/log/mailserver \
              /etc/opendkim/keys \
              /etc/postfix/custom \
+             /etc/postfix/certs \
              /var/spool/postfix \
              /usr/local/bin
 
 # Copy scripts and entrypoint
 COPY scripts/postfix-log-consolidator.py /usr/local/bin/postfix-log-consolidator.py
 COPY scripts/generate-dkim.sh /usr/local/bin/generate-dkim.sh
+COPY scripts/generate-tls-cert.sh /usr/local/bin/generate-tls-cert.sh
 COPY entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh \
              /usr/local/bin/postfix-log-consolidator.py \
-             /usr/local/bin/generate-dkim.sh
+             /usr/local/bin/generate-dkim.sh \
+             /usr/local/bin/generate-tls-cert.sh
 
 EXPOSE 25 587 2525
 

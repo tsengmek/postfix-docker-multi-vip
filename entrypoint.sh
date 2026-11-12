@@ -123,7 +123,11 @@ done
 
 : "${SMTP_TLS_SECURITY_LEVEL:=may}"
 : "${SMTP_TLS_LOGLEVEL:=1}"
-: "${SMTPD_TLS_SECURITY_LEVEL:=none}"
+: "${SMTPD_TLS_SECURITY_LEVEL:=may}"
+: "${SMTPD_TLS_LOGLEVEL:=1}"
+: "${SMTPD_TLS_CERT_FILE:=/etc/postfix/certs/tls.crt}"
+: "${SMTPD_TLS_KEY_FILE:=/etc/postfix/certs/tls.key}"
+: "${AUTO_GENERATE_TLS_CERT:=true}"
 
 # Set timezone if zoneinfo exists
 if [ -f "/usr/share/zoneinfo/${TZ}" ]; then
@@ -428,14 +432,48 @@ postconf -e "smtp_destination_rate_delay = ${SMTP_DESTINATION_RATE_DELAY}"
 postconf -e "initial_destination_concurrency = ${INITIAL_DESTINATION_CONCURRENCY}"
 postconf -e "message_size_limit = ${MESSAGE_SIZE_LIMIT}"
 
-# Outbound & Inbound TLS configuration
+# Inbound TLS / STARTTLS certificate provisioning
+if [ "${SMTPD_TLS_SECURITY_LEVEL}" != "none" ]; then
+    mkdir -p "$(dirname "${SMTPD_TLS_CERT_FILE}")" "$(dirname "${SMTPD_TLS_KEY_FILE}")"
+    if [ ! -f "${SMTPD_TLS_CERT_FILE}" ] || [ ! -f "${SMTPD_TLS_KEY_FILE}" ]; then
+        if [ "${AUTO_GENERATE_TLS_CERT}" = "true" ]; then
+            log_info "Inbound TLS certificate/key not found. Generating self-signed certificate..."
+            GEN_TLS_CMD="/usr/local/bin/generate-tls-cert.sh"
+            if [ ! -x "${GEN_TLS_CMD}" ] && [ -x "./scripts/generate-tls-cert.sh" ]; then
+                GEN_TLS_CMD="./scripts/generate-tls-cert.sh"
+            fi
+            ${GEN_TLS_CMD} "${MYHOSTNAME}" "${MAIL_DOMAIN}" "${SMTPD_TLS_CERT_FILE}" "${SMTPD_TLS_KEY_FILE}"
+        else
+            log_warn "Inbound TLS enabled (${SMTPD_TLS_SECURITY_LEVEL}), but certificate files not found and AUTO_GENERATE_TLS_CERT=false."
+        fi
+    else
+        log_info "Using existing inbound TLS certificate: ${SMTPD_TLS_CERT_FILE}"
+    fi
+fi
+
+# Outbound TLS configuration (client smtp)
 postconf -e "smtp_tls_security_level = ${SMTP_TLS_SECURITY_LEVEL}"
 postconf -e "smtp_tls_loglevel = ${SMTP_TLS_LOGLEVEL}"
 postconf -e "smtp_tls_CAfile = /etc/pki/tls/certs/ca-bundle.crt"
 postconf -e "smtp_tls_session_cache_database = lmdb:\${data_directory}/smtp_scache"
 postconf -e "smtp_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1"
 postconf -e "smtp_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1"
+
+# Inbound TLS / STARTTLS configuration (server smtpd)
 postconf -e "smtpd_tls_security_level = ${SMTPD_TLS_SECURITY_LEVEL}"
+postconf -e "smtpd_tls_loglevel = ${SMTPD_TLS_LOGLEVEL}"
+postconf -e "smtpd_tls_received_header = yes"
+postconf -e "smtpd_tls_session_cache_database = lmdb:\${data_directory}/smtpd_scache"
+postconf -e "smtpd_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1"
+postconf -e "smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1"
+postconf -e "smtpd_tls_ciphers = medium"
+postconf -e "smtpd_tls_mandatory_ciphers = medium"
+
+if [ "${SMTPD_TLS_SECURITY_LEVEL}" != "none" ] && [ -f "${SMTPD_TLS_CERT_FILE}" ] && [ -f "${SMTPD_TLS_KEY_FILE}" ]; then
+    postconf -e "smtpd_tls_cert_file = ${SMTPD_TLS_CERT_FILE}"
+    postconf -e "smtpd_tls_key_file = ${SMTPD_TLS_KEY_FILE}"
+    log_info "Inbound STARTTLS active: cert=${SMTPD_TLS_CERT_FILE}, level=${SMTPD_TLS_SECURITY_LEVEL}"
+fi
 
 # Hardening
 postconf -e "disable_vrfy_command = yes"

@@ -20,6 +20,8 @@ services:
       - ./spool:/var/spool/postfix:Z
       # Custom static config overrides (transport, allowed_senders, sender_vip_map, header_checks)
       - ./config:/etc/postfix/custom:ro,Z
+      # Persistent TLS certificates & keys for inbound STARTTLS
+      - ./certs:/etc/postfix/certs:Z
     healthcheck:
       test: ["CMD-SHELL", "/usr/local/bin/healthcheck.sh"]
       interval: 15s

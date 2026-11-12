@@ -8,6 +8,10 @@ __pycache__/
 # DKIM private and public keys
 dkim/
 
+# TLS certificates and private keys
+certs/*
+!certs/.gitkeep
+
 # Postfix mail queue and runtime spools
 spool/
 
