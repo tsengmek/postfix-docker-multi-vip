@@ -1,6 +1,6 @@
 # Production Postfix Multi-VIP HA Mail Relay & OpenDKIM (RHEL 9)
 
-High-availability **Postfix + OpenDKIM** outbound mail server designed for **Red Hat Enterprise Linux 9 (RHEL 9)** behind a hardware firewall with **5 1-to-1 NAT Public IPs** and **1 Inbound VIP** managed by **Keepalived**.
+High-availability **Postfix + OpenDKIM** outbound mail server designed for **Red Hat Enterprise Linux 9 (RHEL 9)** behind a hardware firewall with **dynamic 1-to-1 NAT Outbound VIPs** and **1 Inbound VIP** managed by **Keepalived**.
 
 Built for high-deliverability **OTP** and transactional emails to **Google (Gmail), Yahoo, Microsoft Outlook / Office 365**, and custom partner MX relays.
 
@@ -8,9 +8,9 @@ Built for high-deliverability **OTP** and transactional emails to **Google (Gmai
 
 ## Key Features
 
-1. **6 Keepalived VIPs (Active/Backup HA on RHEL 9)**:
+1. **Keepalived HA VIPs (Active/Backup HA on RHEL 9)**:
    - **1 Inbound VIP (`INBOUND_VIP`)**: Internal application servers connect here to submit mail.
-   - **5 Outbound VIPs (`OUTBOUND_VIP_1`..`5`)**: Mapped 1-to-1 on the hardware firewall to 5 Public IPs. Postfix distributes outbound mail across all 5 VIPs via `randmap` round-robin by default, with optional sender-to-VIP pinning (`SENDER_VIP_MAPPINGS`).
+   - **Dynamic Outbound VIPs (`OUTBOUND_VIP_1`..`N`)**: Mapped 1-to-1 on the hardware firewall to Public IPs. Postfix distributes outbound mail across all active VIPs via `randmap` round-robin by default (or directly if 1 VIP is configured), with optional sender-to-VIP pinning (`SENDER_VIP_MAPPINGS`).
 2. **Strict Access Control**:
    - **Network Whitelist (`ALLOWED_NETWORKS`)**: Only permitted internal subnets (`mynetworks`) can connect.
    - **Sender Email Whitelist (`ALLOWED_SENDERS`)**: Only explicitly listed sender addresses (e.g., `otp@company.com`, `notification@company.com`) are allowed in `MAIL FROM`. Unauthorized senders are immediately rejected with `554 5.7.1`.
@@ -94,7 +94,7 @@ Built for high-deliverability **OTP** and transactional emails to **Google (Gmai
    ```
    Adjust:
    - `MAIL_DOMAIN=company.com` and `MYHOSTNAME=mail.company.com`
-   - `INBOUND_VIP` and `OUTBOUND_VIP_1`..`5` + `OUTBOUND_VIP_1_HELO`..`5_HELO`
+   - `INBOUND_VIP` and `OUTBOUND_VIP_1`..`N` + `OUTBOUND_VIP_1_HELO`..`N_HELO` (scale up or down freely)
    - `ALLOWED_NETWORKS` and `ALLOWED_SENDERS`
    - `TRANSPORT_MAPS` (or create `config/transport` from `config/transport.example`)
    - Timeouts and queue lifetimes (`SMTP_CONNECT_TIMEOUT`, `MAXIMAL_QUEUE_LIFETIME`, etc.)
@@ -112,6 +112,56 @@ Built for high-deliverability **OTP** and transactional emails to **Google (Gmai
    cat dkim/company.com/mail.txt
    ```
    Copy the generated key from `./dkim/company.com/` to the Backup RHEL 9 node so both nodes sign with the identical DKIM private key.
+
+---
+
+## Dynamic Outbound VIP Scaling (Scale Up or Down)
+
+The number of outbound VIPs is **completely dynamic**. You do not need to modify any code or scripts to change the number of outbound VIPs.
+
+### 1. Scaling Down (e.g. 2 VIPs)
+In `.env`, simply configure `OUTBOUND_VIP_1` and `OUTBOUND_VIP_2`, and omit or comment out 3+:
+```ini
+OUTBOUND_VIP_1=10.10.10.101
+OUTBOUND_VIP_1_HELO=mail1.company.com
+OUTBOUND_VIP_2=10.10.10.102
+OUTBOUND_VIP_2_HELO=mail2.company.com
+```
+Postfix will automatically:
+- Create transports `smtp_vip1` and `smtp_vip2` in `master.cf`.
+- Set `default_transport = randmap:{smtp_vip1,smtp_vip2}` in `main.cf`.
+- Authorize only `10.10.10.101` and `10.10.10.102` in OpenDKIM `TrustedHosts`.
+
+### 2. Scaling Up (e.g. 8 VIPs)
+Simply append additional numbered variables in `.env`:
+```ini
+OUTBOUND_VIP_6=10.10.10.106
+OUTBOUND_VIP_6_HELO=mail6.company.com
+OUTBOUND_VIP_7=10.10.10.107
+OUTBOUND_VIP_7_HELO=mail7.company.com
+OUTBOUND_VIP_8=10.10.10.108
+OUTBOUND_VIP_8_HELO=mail8.company.com
+```
+Postfix will automatically generate `smtp_vip1` through `smtp_vip8` and balance across all 8 VIPs:
+`randmap:{smtp_vip1,smtp_vip2,smtp_vip3,smtp_vip4,smtp_vip5,smtp_vip6,smtp_vip7,smtp_vip8}`.
+
+### 3. Single VIP Mode (1 VIP)
+If only `OUTBOUND_VIP_1` is defined, Postfix sets `default_transport = smtp_vip1` directly without overhead.
+
+### 4. Keepalived Host Configuration Note
+When scaling VIPs up or down, update `/etc/keepalived/keepalived.conf` on both RHEL 9 nodes so Keepalived assigns the matching VIP addresses to the network interface:
+```text
+    virtual_ipaddress {
+        10.10.10.100/24 dev ens192 label ens192:in_vip
+        10.10.10.101/24 dev ens192 label ens192:nat_vip1
+        10.10.10.102/24 dev ens192 label ens192:nat_vip2
+        # Add nat_vip3..nat_vipN as appropriate
+    }
+```
+Reload Keepalived on both nodes:
+```bash
+sudo systemctl reload keepalived
+```
 
 ---
 
@@ -205,18 +255,17 @@ Both log files are available inside the container at `/var/log/maillog` and `/va
 
 ## Production Best Practices for Gmail, Yahoo & Outlook Deliverability
 
-1. **Forward-Confirmed Reverse DNS (FCrDNS) for All 5 NAT Public IPs**:
-   Every outbound VIP (`OUTBOUND_VIP_1`..`5`) is NATed 1-to-1 by your hardware firewall to a Public IP (`Public_IP_1`..`5`). Ensure your ISP / DNS provider configures matching `A` and `PTR` records for all 5 Public IPs:
+1. **Forward-Confirmed Reverse DNS (FCrDNS) for All Outbound NAT Public IPs**:
+   Every outbound VIP (`OUTBOUND_VIP_1`..`N`) is NATed 1-to-1 by your hardware firewall to a Public IP (`Public_IP_1`..`N`). Ensure your ISP / DNS provider configures matching `A` and `PTR` records for all configured Public IPs:
    - `Public_IP_1` $\leftrightarrow$ `mail1.company.com` (`OUTBOUND_VIP_1_HELO=mail1.company.com`)
    - `Public_IP_2` $\leftrightarrow$ `mail2.company.com` (`OUTBOUND_VIP_2_HELO=mail2.company.com`)
    - `Public_IP_3` $\leftrightarrow$ `mail3.company.com` (`OUTBOUND_VIP_3_HELO=mail3.company.com`)
-   - `Public_IP_4` $\leftrightarrow$ `mail4.company.com` (`OUTBOUND_VIP_4_HELO=mail4.company.com`)
-   - `Public_IP_5` $\leftrightarrow$ `mail5.company.com` (`OUTBOUND_VIP_5_HELO=mail5.company.com`)
+   - ... (and so on for all active VIPs)
 
 2. **Required DNS Records on `company.com` (SPF, DKIM, DMARC)**:
-   - **SPF TXT Record (`company.com`)**:
+   - **SPF TXT Record (`company.com`)**: Include all active outbound public IPs:
      ```text
-     v=spf1 ip4:<Public_IP_1> ip4:<Public_IP_2> ip4:<Public_IP_3> ip4:<Public_IP_4> ip4:<Public_IP_5> -all
+     v=spf1 ip4:<Public_IP_1> ip4:<Public_IP_2> ... ip4:<Public_IP_N> -all
      ```
    - **DKIM TXT Record (`mail._domainkey.company.com`)**:
      Publish the 2048-bit key output in `./dkim/company.com/mail.txt`.
@@ -233,7 +282,7 @@ Both log files are available inside the container at `/var/log/maillog` and `/va
    This dedicates VIPs 1 & 2 exclusively to `otp@company.com` and VIPs 3, 4 & 5 to `notification@company.com`.
 
 4. **External Postmaster Registration**:
-   Register your domain and all 5 public NAT IPs with:
+   Register your domain and all active public NAT IPs with:
    - **Google Postmaster Tools** (`postmaster.google.com`)
    - **Microsoft SNDS & JMRP** (`sendersupport.olc.protection.outlook.com/snds/`)
    - **Yahoo Sender Hub** (`senders.yahooinc.com`)

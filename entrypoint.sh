@@ -10,7 +10,7 @@ log_warn() {
 }
 
 # ==============================================================================
-# 1. ENVIRONMENT DEFAULTS
+# 1. ENVIRONMENT DEFAULTS & DYNAMIC OUTBOUND VIP RESOLUTION
 # ==============================================================================
 : "${TZ:=Asia/Bangkok}"
 : "${MAIL_DOMAIN:=company.com}"
@@ -19,16 +19,68 @@ log_warn() {
 : "${INBOUND_VIP:=10.10.10.100}"
 : "${INBOUND_INET_INTERFACES:=all}"
 
-: "${OUTBOUND_VIP_1:=10.10.10.101}"
-: "${OUTBOUND_VIP_1_HELO:=mail1.${MAIL_DOMAIN}}"
-: "${OUTBOUND_VIP_2:=10.10.10.102}"
-: "${OUTBOUND_VIP_2_HELO:=mail2.${MAIL_DOMAIN}}"
-: "${OUTBOUND_VIP_3:=10.10.10.103}"
-: "${OUTBOUND_VIP_3_HELO:=mail3.${MAIL_DOMAIN}}"
-: "${OUTBOUND_VIP_4:=10.10.10.104}"
-: "${OUTBOUND_VIP_4_HELO:=mail4.${MAIL_DOMAIN}}"
-: "${OUTBOUND_VIP_5:=10.10.10.105}"
-: "${OUTBOUND_VIP_5_HELO:=mail5.${MAIL_DOMAIN}}"
+# Dynamic Outbound VIP Resolution:
+# Supports Option 1 (Numbered variables): OUTBOUND_VIP_1..N and OUTBOUND_VIP_1..N_HELO
+# Also supports Option 2 (List variable): OUTBOUND_VIPS=ip1:helo1,ip2:helo2,...
+declare -a RESOLVED_VIP_KEYS=()
+declare -a RESOLVED_VIP_IPS=()
+declare -a RESOLVED_VIP_HELOS=()
+
+if [ -n "${OUTBOUND_VIPS:-}" ]; then
+    IFS=',' read -ra VIP_ENTRIES <<< "${OUTBOUND_VIPS}"
+    idx=1
+    for raw_entry in "${VIP_ENTRIES[@]}"; do
+        entry="$(echo "${raw_entry}" | xargs)"
+        if [ -n "${entry}" ]; then
+            if [[ "${entry}" == *":"* ]]; then
+                ip="${entry%%:*}"
+                helo="${entry#*:}"
+            else
+                ip="${entry}"
+                helo="mail${idx}.${MAIL_DOMAIN}"
+            fi
+            RESOLVED_VIP_KEYS+=("${idx}")
+            RESOLVED_VIP_IPS+=("${ip}")
+            RESOLVED_VIP_HELOS+=("${helo}")
+            idx=$((idx + 1))
+        fi
+    done
+else
+    # Scan for numbered variables: OUTBOUND_VIP_1, OUTBOUND_VIP_2, ...
+    found_vip=0
+    for i in $(seq 1 100); do
+        var_name="OUTBOUND_VIP_${i}"
+        if [ -n "${!var_name:-}" ]; then
+            found_vip=1
+            break
+        fi
+    done
+
+    # If no outbound VIP variables were provided, fall back to 5 default VIPs for backward compatibility
+    if [ "${found_vip}" -eq 0 ]; then
+        for i in $(seq 1 5); do
+            vip_var="OUTBOUND_VIP_${i}"
+            helo_var="OUTBOUND_VIP_${i}_HELO"
+            eval "${vip_var}=\"10.10.10.10${i}\""
+            eval "${helo_var}=\"mail${i}.${MAIL_DOMAIN}\""
+        done
+    fi
+
+    for i in $(seq 1 100); do
+        vip_var="OUTBOUND_VIP_${i}"
+        helo_var="OUTBOUND_VIP_${i}_HELO"
+        if [ -n "${!vip_var:-}" ]; then
+            RESOLVED_VIP_KEYS+=("${i}")
+            RESOLVED_VIP_IPS+=("${!vip_var}")
+            RESOLVED_VIP_HELOS+=("${!helo_var:-mail${i}.${MAIL_DOMAIN}}")
+        fi
+    done
+fi
+
+log_info "Resolved ${#RESOLVED_VIP_KEYS[@]} Outbound VIP(s):"
+for idx in "${!RESOLVED_VIP_KEYS[@]}"; do
+    log_info "  - vip${RESOLVED_VIP_KEYS[$idx]}: IP=${RESOLVED_VIP_IPS[$idx]} HELO=${RESOLVED_VIP_HELOS[$idx]}"
+done
 
 : "${ALLOWED_NETWORKS:=127.0.0.0/8, 10.10.10.0/24, 192.168.1.0/24}"
 : "${ALLOWED_SENDERS:=otp@${MAIL_DOMAIN}, notification@${MAIL_DOMAIN}}"
@@ -175,21 +227,50 @@ log_info "Generating /etc/postfix/sender_transport..."
 : > /etc/postfix/sender_transport
 
 if [ -n "${SENDER_VIP_MAPPINGS}" ]; then
-    IFS=',' read -ra SVIP_ARR <<< "${SENDER_VIP_MAPPINGS}"
-    for raw_map in "${SVIP_ARR[@]}"; do
-        map_item="$(echo "${raw_map}" | xargs)"
-        if [ -n "${map_item}" ]; then
-            sender_key="${map_item%%:*}"
-            vip_target="${map_item#*:}"
-            # Convert shorthand "vip1".."vip5" to "smtp_vip1:".."smtp_vip5:"
-            if [[ "${vip_target}" =~ ^vip[1-5]$ ]]; then
-                vip_target="smtp_${vip_target}:"
-            elif [[ "${vip_target}" =~ ^smtp_vip[1-5]$ ]]; then
-                vip_target="${vip_target}:"
+    # Parse mappings while preserving commas inside randmap:{...}
+    raw_item=""
+    brace_depth=0
+    for (( i=0; i<${#SENDER_VIP_MAPPINGS}; i++ )); do
+        c="${SENDER_VIP_MAPPINGS:$i:1}"
+        if [ "$c" = "{" ]; then
+            brace_depth=$((brace_depth + 1))
+            raw_item+="$c"
+        elif [ "$c" = "}" ]; then
+            brace_depth=$((brace_depth - 1))
+            raw_item+="$c"
+        elif [ "$c" = "," ] || [ "$c" = ";" ]; then
+            if [ "$brace_depth" -eq 0 ]; then
+                map_item="$(echo "${raw_item}" | xargs)"
+                if [ -n "${map_item}" ]; then
+                    sender_key="${map_item%%:*}"
+                    vip_target="${map_item#*:}"
+                    if [[ "${vip_target}" =~ ^vip[0-9]+$ ]]; then
+                        vip_target="smtp_${vip_target}:"
+                    elif [[ "${vip_target}" =~ ^smtp_vip[0-9]+$ ]]; then
+                        vip_target="${vip_target}:"
+                    fi
+                    echo "${sender_key}    ${vip_target}" >> /etc/postfix/sender_transport
+                fi
+                raw_item=""
+                continue
+            else
+                raw_item+="$c"
             fi
-            echo "${sender_key}    ${vip_target}" >> /etc/postfix/sender_transport
+        else
+            raw_item+="$c"
         fi
     done
+    map_item="$(echo "${raw_item}" | xargs)"
+    if [ -n "${map_item}" ]; then
+        sender_key="${map_item%%:*}"
+        vip_target="${map_item#*:}"
+        if [[ "${vip_target}" =~ ^vip[0-9]+$ ]]; then
+            vip_target="smtp_${vip_target}:"
+        elif [[ "${vip_target}" =~ ^smtp_vip[0-9]+$ ]]; then
+            vip_target="${vip_target}:"
+        fi
+        echo "${sender_key}    ${vip_target}" >> /etc/postfix/sender_transport
+    fi
 fi
 
 if [ -f /etc/postfix/custom/sender_vip_map ]; then
@@ -244,39 +325,25 @@ else
     sed -i -E "s/^[0-9]+([[:space:]]+inet[[:space:]]+.*smtpd)/smtp\1/" /etc/postfix/master.cf
 fi
 
-log_info "Configuring 5 Outbound VIP transports (smtp_vip1..smtp_vip5) in /etc/postfix/master.cf..."
+log_info "Configuring ${#RESOLVED_VIP_KEYS[@]} Outbound VIP transport(s) in /etc/postfix/master.cf..."
 
 # Remove any previously appended block before adding fresh block
 sed -i '/# === BEGIN MULTI-VIP TRANSPORTS ===/,/# === END MULTI-VIP TRANSPORTS ===/d' /etc/postfix/master.cf
 
-cat >> /etc/postfix/master.cf <<EOF
-# === BEGIN MULTI-VIP TRANSPORTS ===
-smtp_vip1 unix - - n - - smtp
-  -o syslog_name=postfix/vip1
-  -o smtp_bind_address=${OUTBOUND_VIP_1}
-  -o smtp_helo_name=${OUTBOUND_VIP_1_HELO}
-
-smtp_vip2 unix - - n - - smtp
-  -o syslog_name=postfix/vip2
-  -o smtp_bind_address=${OUTBOUND_VIP_2}
-  -o smtp_helo_name=${OUTBOUND_VIP_2_HELO}
-
-smtp_vip3 unix - - n - - smtp
-  -o syslog_name=postfix/vip3
-  -o smtp_bind_address=${OUTBOUND_VIP_3}
-  -o smtp_helo_name=${OUTBOUND_VIP_3_HELO}
-
-smtp_vip4 unix - - n - - smtp
-  -o syslog_name=postfix/vip4
-  -o smtp_bind_address=${OUTBOUND_VIP_4}
-  -o smtp_helo_name=${OUTBOUND_VIP_4_HELO}
-
-smtp_vip5 unix - - n - - smtp
-  -o syslog_name=postfix/vip5
-  -o smtp_bind_address=${OUTBOUND_VIP_5}
-  -o smtp_helo_name=${OUTBOUND_VIP_5_HELO}
-# === END MULTI-VIP TRANSPORTS ===
-EOF
+{
+    echo "# === BEGIN MULTI-VIP TRANSPORTS ==="
+    for idx in "${!RESOLVED_VIP_KEYS[@]}"; do
+        k="${RESOLVED_VIP_KEYS[$idx]}"
+        ip="${RESOLVED_VIP_IPS[$idx]}"
+        helo="${RESOLVED_VIP_HELOS[$idx]}"
+        echo "smtp_vip${k} unix - - n - - smtp"
+        echo "  -o syslog_name=postfix/vip${k}"
+        echo "  -o smtp_bind_address=${ip}"
+        echo "  -o smtp_helo_name=${helo}"
+        echo ""
+    done
+    echo "# === END MULTI-VIP TRANSPORTS ==="
+} >> /etc/postfix/master.cf
 
 # ==============================================================================
 # 8. CONFIGURE POSTFIX main.cf
@@ -295,8 +362,28 @@ postconf -e "mynetworks = ${ALLOWED_NETWORKS}"
 postconf -e "maillog_file = /var/log/mailserver/maillog"
 postconf -e "maillog_file_prefixes = /var/log"
 
-# Multi-VIP round-robin default transport + optional sender pinning + custom destination domain transport_maps
-postconf -e "default_transport = randmap:{smtp_vip1,smtp_vip2,smtp_vip3,smtp_vip4,smtp_vip5}"
+# Multi-VIP load-balancing default transport:
+# - If 2 or more VIPs: use Postfix randmap for round-robin load balancing
+# - If exactly 1 VIP: direct default transport
+# - If 0 VIPs: standard postfix smtp default
+if [ "${#RESOLVED_VIP_KEYS[@]}" -gt 1 ]; then
+    randmap_targets=""
+    for k in "${RESOLVED_VIP_KEYS[@]}"; do
+        if [ -z "${randmap_targets}" ]; then
+            randmap_targets="smtp_vip${k}"
+        else
+            randmap_targets="${randmap_targets},smtp_vip${k}"
+        fi
+    done
+    log_info "Setting default_transport = randmap:{${randmap_targets}}"
+    postconf -e "default_transport = randmap:{${randmap_targets}}"
+elif [ "${#RESOLVED_VIP_KEYS[@]}" -eq 1 ]; then
+    log_info "Setting default_transport = smtp_vip${RESOLVED_VIP_KEYS[0]}"
+    postconf -e "default_transport = smtp_vip${RESOLVED_VIP_KEYS[0]}"
+else
+    log_info "No outbound VIPs configured, setting default_transport = smtp"
+    postconf -e "default_transport = smtp"
+fi
 postconf -e "transport_maps = hash:/etc/postfix/transport"
 if [ -s /etc/postfix/sender_transport ]; then
     postconf -e "sender_dependent_default_transport_maps = hash:/etc/postfix/sender_transport"
@@ -402,12 +489,11 @@ localhost
 ${MYHOSTNAME}
 *.${MAIL_DOMAIN}
 ${INBOUND_VIP}
-${OUTBOUND_VIP_1}
-${OUTBOUND_VIP_2}
-${OUTBOUND_VIP_3}
-${OUTBOUND_VIP_4}
-${OUTBOUND_VIP_5}
 EOF
+
+    for ip in "${RESOLVED_VIP_IPS[@]}"; do
+        echo "${ip}" >> /etc/opendkim/TrustedHosts
+    done
 
     IFS=',' read -ra NET_ARR <<< "${ALLOWED_NETWORKS}"
     for raw_net in "${NET_ARR[@]}"; do
