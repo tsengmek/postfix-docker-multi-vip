@@ -12,7 +12,7 @@ logger -t keepalived-mailserver "VRRP ${TYPE} ${NAME} transitioned to state: ${S
 
 case "${STATE}" in
     MASTER)
-        logger -t keepalived-mailserver "Node is now MASTER for all 6 VIPs. Flushing Postfix queue..."
+        logger -t keepalived-mailserver "Node is now MASTER for all VIPs. Flushing Postfix queue..."
         docker exec postfix-relay postfix flush >/dev/null 2>&1 || true
         ;;
     BACKUP|FAULT)

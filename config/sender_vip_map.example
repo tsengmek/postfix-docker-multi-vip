@@ -3,16 +3,17 @@
 # Copy this file to config/sender_vip_map (or set SENDER_VIP_MAPPINGS in .env)
 # if you want to pin specific sender addresses to specific Outbound NAT VIPs.
 #
-# By default, any sender not listed here uses round-robin across all 5 VIPs:
-#   randmap:{smtp_vip1,smtp_vip2,smtp_vip3,smtp_vip4,smtp_vip5}
+# By default, any sender not listed here uses the dynamic VIP pool defined in .env:
+#   randmap:{smtp_vip1,smtp_vip2,...} (or smtp_vip1 if only 1 VIP is configured)
 # ==============================================================================
 #
 # Examples:
 #
 # 1. Isolate high-priority OTP emails to VIP 1 & VIP 2 (protects OTP IP reputation),
-#    and route bulk notifications to VIP 3, VIP 4, and VIP 5:
+#    and route bulk notifications to other VIPs (e.g. VIP 3, VIP 4, VIP 5):
 # otp@company.com           randmap:{smtp_vip1,smtp_vip2}
 # notification@company.com  randmap:{smtp_vip3,smtp_vip4,smtp_vip5}
 #
-# 2. Pin a sender strictly to a single VIP:
+# 2. Pin a sender strictly to a single VIP (supports any configured VIP number vip1..vipN):
 # otp@company.com           smtp_vip1:
+# alerts@company.com        smtp_vip6:
