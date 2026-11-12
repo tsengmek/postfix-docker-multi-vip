@@ -69,6 +69,10 @@ DKIM_HDR_RE = re.compile(
     r"\bd=(?P<domain>[^;\s]+).*?\bs=(?P<selector>[^;\s]+)|\bs=(?P<selector2>[^;\s]+).*?\bd=(?P<domain2>[^;\s]+)"
 )
 
+VIP_PROC_RE = re.compile(
+    r"(?:postfix/)?(?:vip(?P<v1>[a-zA-Z0-9_-]+)/smtp|smtp_vip(?P<v2>[a-zA-Z0-9_-]+)|vip(?P<v3>[a-zA-Z0-9_-]+))"
+)
+
 
 class QueueConsolidator:
     def __init__(self, output_path: str, timeout_sec: int = 300):
@@ -76,6 +80,19 @@ class QueueConsolidator:
         self.timeout_sec = timeout_sec
         self.inflight: Dict[str, Dict[str, Any]] = {}
         self.running = True
+        self.vip_map = self._load_vip_map()
+
+    @staticmethod
+    def _load_vip_map() -> Dict[str, str]:
+        vm = {}
+        for k, v in os.environ.items():
+            m = re.match(r"^OUTBOUND_VIP_(\w+)$", k)
+            if m and v:
+                idx = m.group(1).lower()
+                vm[f"vip{idx}"] = v
+                vm[idx] = v
+                vm[f"smtp_vip{idx}"] = v
+        return vm
 
     def now_iso(self) -> str:
         return datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
@@ -83,32 +100,22 @@ class QueueConsolidator:
     def get_or_create(self, qid: str, ts: str, host: str) -> Dict[str, Any]:
         if qid not in self.inflight:
             self.inflight[qid] = {
-                "timestamp": self.now_iso(),
                 "first_seen": ts,
                 "last_seen": ts,
                 "queue_id": qid,
-                "hostname": host,
                 "client_ip": None,
                 "client_hostname": None,
-                "helo": None,
                 "from": None,
                 "to": [],
+                "cc": None,
                 "message_id": None,
                 "size": None,
-                "nrcpt": None,
-                "headers": {},
-                "dkim_signed": False,
-                "dkim_domain": None,
-                "dkim_selector": None,
-                "transport": None,
-                "relay": None,
-                "dsn": None,
+                "subject": None,
                 "status": "in_progress",
+                "dsn": None,
                 "smtp_response": None,
-                "delay_total": None,
-                "delays": None,
-                "deliveries": [],
-                "raw_messages": [],
+                "vip": None,
+                "vip_ip": None,
                 "_updated_at": time.time(),
             }
         rec = self.inflight[qid]
@@ -117,8 +124,38 @@ class QueueConsolidator:
         return rec
 
     def emit_json(self, record: Dict[str, Any]) -> None:
-        out = {k: v for k, v in record.items() if not k.startswith("_")}
-        out["timestamp"] = self.now_iso()
+        to_val: Optional[str] = None
+        if record.get("to"):
+            if isinstance(record["to"], list):
+                seen = set()
+                deduped = []
+                for addr in record["to"]:
+                    if addr and addr not in seen:
+                        seen.add(addr)
+                        deduped.append(addr)
+                to_val = ", ".join(deduped) if deduped else None
+            else:
+                to_val = str(record["to"])
+
+        out = {
+            "timestamp": self.now_iso(),
+            "first_seen": record.get("first_seen"),
+            "last_seen": record.get("last_seen"),
+            "queue_id": record.get("queue_id"),
+            "client_ip": record.get("client_ip"),
+            "client_hostname": record.get("client_hostname"),
+            "from": record.get("from"),
+            "to": to_val,
+            "cc": record.get("cc"),
+            "message_id": record.get("message_id"),
+            "size": record.get("size"),
+            "subject": record.get("subject"),
+            "status": record.get("status"),
+            "dsn": record.get("dsn"),
+            "smtp_response": record.get("smtp_response"),
+            "vip": record.get("vip"),
+            "vip_ip": record.get("vip_ip"),
+        }
         os.makedirs(os.path.dirname(os.path.abspath(self.output_path)), exist_ok=True)
         with open(self.output_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(out, ensure_ascii=False) + "\n")
@@ -143,32 +180,22 @@ class QueueConsolidator:
         if nq:
             rest = nq.group("rest")
             rec = {
-                "timestamp": self.now_iso(),
                 "first_seen": ts,
                 "last_seen": ts,
                 "queue_id": "NOQUEUE",
-                "hostname": host,
                 "client_ip": None,
                 "client_hostname": None,
-                "helo": None,
                 "from": None,
                 "to": [],
+                "cc": None,
                 "message_id": None,
                 "size": None,
-                "nrcpt": None,
-                "headers": {},
-                "dkim_signed": False,
-                "dkim_domain": None,
-                "dkim_selector": None,
-                "transport": proc,
-                "relay": None,
-                "dsn": None,
+                "subject": None,
                 "status": "rejected",
+                "dsn": None,
                 "smtp_response": rest,
-                "delay_total": 0.0,
-                "delays": None,
-                "deliveries": [],
-                "raw_messages": [f"NOQUEUE: reject: {rest}"],
+                "vip": None,
+                "vip_ip": None,
             }
             cm = re.search(r"from\s+([^\[]+)\[([^\]]+)\]", rest)
             if cm:
@@ -180,9 +207,6 @@ class QueueConsolidator:
             tm = re.search(r"to=<([^>]*)>", rest)
             if tm:
                 rec["to"] = [tm.group(1)]
-            hm = re.search(r"helo=<([^>]*)>", rest)
-            if hm:
-                rec["helo"] = hm.group(1)
             dm = re.search(r"\b([45]\.\d+\.\d+)\b", rest)
             if dm:
                 rec["dsn"] = dm.group(1)
@@ -196,7 +220,6 @@ class QueueConsolidator:
         qid = qm.group("qid")
         rest = qm.group("rest")
         rec = self.get_or_create(qid, ts, host)
-        rec["raw_messages"].append(f"{proc}: {rest}")
 
         # 1. smtpd client connection
         cm = CLIENT_RE.search(rest)
@@ -212,23 +235,14 @@ class QueueConsolidator:
         # 3. cleanup header_checks / milter_header_checks INFO lines
         hm = HEADER_INFO_RE.match(rest)
         if hm:
-            hname = hm.group("hname")
+            hname = hm.group("hname").lower()
             hval = hm.group("hval").strip()
-            if hname.lower() == "dkim-signature":
-                rec["dkim_signed"] = True
-                dm = DKIM_HDR_RE.search(hval)
-                if dm:
-                    rec["dkim_domain"] = dm.group("domain") or dm.group("domain2")
-                    rec["dkim_selector"] = dm.group("selector") or dm.group("selector2")
-            # Store header in headers dict (preserve multiple X- headers or overwrite standard ones)
-            if hname in rec["headers"] and hname.lower() not in ("subject", "from", "to", "date", "message-id"):
-                existing = rec["headers"][hname]
-                if isinstance(existing, list):
-                    existing.append(hval)
-                else:
-                    rec["headers"][hname] = [existing, hval]
-            else:
-                rec["headers"][hname] = hval
+            if hname == "subject" and not rec["subject"]:
+                rec["subject"] = hval
+            elif hname == "cc" and not rec["cc"]:
+                rec["cc"] = hval
+            elif hname == "message-id" and not rec["message_id"]:
+                rec["message_id"] = hval
 
             if hm.group("chost") and not rec["client_hostname"]:
                 rec["client_hostname"] = hm.group("chost")
@@ -238,58 +252,38 @@ class QueueConsolidator:
                 rec["from"] = hm.group("env_from")
             if hm.group("env_to") and hm.group("env_to") not in rec["to"]:
                 rec["to"].append(hm.group("env_to"))
-            if hm.group("helo") and not rec["helo"]:
-                rec["helo"] = hm.group("helo")
             return
 
-        # 4. opendkim direct syslog line
-        dk = OPENDKIM_RE.search(rest)
-        if dk:
-            rec["dkim_signed"] = True
-            rec["dkim_selector"] = dk.group("selector")
-            rec["dkim_domain"] = dk.group("domain")
-            return
-
-        # 5. qmgr from/size/nrcpt
+        # 4. qmgr from/size/nrcpt
         qfm = QMGR_FROM_RE.search(rest)
         if qfm:
             rec["from"] = qfm.group("sender")
             rec["size"] = int(qfm.group("size"))
-            rec["nrcpt"] = int(qfm.group("nrcpt"))
             return
 
-        # 6. smtp / delivery line
+        # 5. smtp / delivery line
         dlv = DELIVERY_RE.search(rest)
         if dlv:
             to_addr = dlv.group("to")
             if to_addr and to_addr not in rec["to"]:
                 rec["to"].append(to_addr)
-            rec["transport"] = proc
-            rec["relay"] = dlv.group("relay")
             rec["dsn"] = dlv.group("dsn")
             rec["status"] = dlv.group("status")
             rec["smtp_response"] = dlv.group("resp")
-            try:
-                rec["delay_total"] = float(dlv.group("delay"))
-            except (TypeError, ValueError):
-                rec["delay_total"] = None
-            rec["delays"] = dlv.group("delays")
-            rec["deliveries"].append({
-                "to": to_addr,
-                "transport": proc,
-                "relay": dlv.group("relay"),
-                "dsn": dlv.group("dsn"),
-                "status": dlv.group("status"),
-                "delay": rec["delay_total"],
-                "delays": dlv.group("delays"),
-                "smtp_response": dlv.group("resp"),
-            })
+
+            # Extract VIP from delivery process name (e.g. postfix/vip2/smtp)
+            vm = VIP_PROC_RE.search(proc)
+            if vm:
+                vid = vm.group("v1") or vm.group("v2") or vm.group("v3")
+                rec["vip"] = f"vip{vid}"
+                rec["vip_ip"] = self.vip_map.get(f"vip{vid}") or self.vip_map.get(vid)
+
             # If message is deferred, emit a deferred snapshot immediately so operators see it right away
             if dlv.group("status") == "deferred":
                 self.emit_json(rec)
             return
 
-        # 7. qmgr removed -> final completion of queue_id lifecycle
+        # 6. qmgr removed -> final completion of queue_id lifecycle
         if rest.strip() == "removed":
             self.emit_json(rec)
             del self.inflight[qid]

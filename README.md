@@ -235,60 +235,23 @@ Both log files are available inside the container at `/var/log/maillog` and `/va
 ### Example Consolidated JSON Line (`/var/log/postfix-consolidate.log`)
 ```json
 {
-  "timestamp": "2026-11-11T12:00:05.412091+07:00",
-  "first_seen": "2026-11-11T12:00:04+07:00",
-  "last_seen": "2026-11-11T12:00:05+07:00",
+  "timestamp": "2026-11-12T15:00:05.412091+07:00",
+  "first_seen": "Nov 12 15:00:04",
+  "last_seen": "Nov 12 15:00:05",
   "queue_id": "4X9z1B2c3d4e",
-  "hostname": "mail.company.com",
   "client_ip": "10.10.10.50",
   "client_hostname": "app01.internal.company.com",
-  "helo": "app01.internal.company.com",
   "from": "otp@company.com",
-  "to": ["user@gmail.com"],
+  "to": "user@gmail.com",
+  "cc": "audit@company.com",
   "message_id": "<otp-1731301204@company.com>",
   "size": 1420,
-  "nrcpt": 1,
-  "headers": {
-    "From": "Company OTP Service <otp@company.com>",
-    "To": "<user@gmail.com>",
-    "Subject": "[OTP] Your verification code is 849201",
-    "Date": "Wed, 11 Nov 2026 12:00:04 +0700",
-    "Message-ID": "<otp-1731301204@company.com>",
-    "X-Request-ID": "otp-1731301204",
-    "X-Application": "auth-service",
-    "DKIM-Signature": "v=1; a=rsa-sha256; c=relaxed/simple; d=company.com; s=mail; ..."
-  },
-  "dkim_signed": true,
-  "dkim_domain": "company.com",
-  "dkim_selector": "mail",
-  "transport": "postfix/vip2/smtp",
-  "relay": "gmail-smtp-in.l.google.com[142.250.4.26]:25",
-  "dsn": "2.0.0",
+  "subject": "[OTP] Your verification code is 849201",
   "status": "sent",
+  "dsn": "2.0.0",
   "smtp_response": "250 2.0.0 OK 1731301205-g2",
-  "delay_total": 0.68,
-  "delays": "0.02/0.01/0.24/0.41",
-  "deliveries": [
-    {
-      "to": "user@gmail.com",
-      "transport": "postfix/vip2/smtp",
-      "relay": "gmail-smtp-in.l.google.com[142.250.4.26]:25",
-      "dsn": "2.0.0",
-      "status": "sent",
-      "delay": 0.68,
-      "delays": "0.02/0.01/0.24/0.41",
-      "smtp_response": "250 2.0.0 OK 1731301205-g2"
-    }
-  ],
-  "raw_messages": [
-    "postfix/smtpd: client=app01.internal.company.com[10.10.10.50]",
-    "postfix/cleanup: message-id=<otp-1731301204@company.com>",
-    "postfix/cleanup: info: header Subject: [OTP] Your verification code is 849201 from app01.internal.company.com[10.10.10.50]; from=<otp@company.com> to=<user@gmail.com> proto=ESMTP helo=<app01.internal.company.com>",
-    "postfix/cleanup: info: header DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/simple; d=company.com; s=mail; ...",
-    "postfix/qmgr: from=<otp@company.com>, size=1420, nrcpt=1 (queue active)",
-    "postfix/vip2/smtp: to=<user@gmail.com>, relay=gmail-smtp-in.l.google.com[142.250.4.26]:25, delay=0.68, delays=0.02/0.01/0.24/0.41, dsn=2.0.0, status=sent (250 2.0.0 OK 1731301205-g2)",
-    "postfix/qmgr: removed"
-  ]
+  "vip": "vip2",
+  "vip_ip": "10.10.10.102"
 }
 ```
 
