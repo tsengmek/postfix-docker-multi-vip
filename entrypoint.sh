@@ -46,6 +46,14 @@ if [ -n "${OUTBOUND_VIPS:-}" ]; then
         fi
     done
 else
+    # Check for singular OUTBOUND_VIP alias for OUTBOUND_VIP_1
+    if [ -n "${OUTBOUND_VIP:-}" ] && [ -z "${OUTBOUND_VIP_1:-}" ]; then
+        OUTBOUND_VIP_1="${OUTBOUND_VIP}"
+    fi
+    if [ -n "${OUTBOUND_VIP_HELO:-}" ] && [ -z "${OUTBOUND_VIP_1_HELO:-}" ]; then
+        OUTBOUND_VIP_1_HELO="${OUTBOUND_VIP_HELO}"
+    fi
+
     # Scan for numbered variables: OUTBOUND_VIP_1, OUTBOUND_VIP_2, ...
     found_vip=0
     for i in $(seq 1 100); do
@@ -86,6 +94,7 @@ done
 : "${ALLOWED_SENDERS:=otp@${MAIL_DOMAIN}, notification@${MAIL_DOMAIN}}"
 : "${SENDER_VIP_MAPPINGS:=}"
 : "${TRANSPORT_MAPS:=}"
+: "${ENABLE_HAPROXY_PROXY_PROTOCOL:=false}"
 
 : "${ENABLE_DKIM:=true}"
 : "${DKIM_SELECTOR:=mail}"
@@ -183,14 +192,14 @@ log_info "Generating /etc/postfix/allowed_senders..."
 
 IFS=',' read -ra SENDERS_ARR <<< "${ALLOWED_SENDERS}"
 for raw_sender in "${SENDERS_ARR[@]}"; do
-    sender="$(echo "${raw_sender}" | xargs)"
+    sender="$(echo "${raw_sender}" | tr '[:upper:]' '[:lower:]' | xargs)"
     if [ -n "${sender}" ]; then
         echo "${sender}    OK" >> /etc/postfix/allowed_senders
     fi
 done
 
 if [ -f /etc/postfix/custom/allowed_senders ]; then
-    grep -vE '^\s*(#|$)' /etc/postfix/custom/allowed_senders >> /etc/postfix/allowed_senders || true
+    grep -vE '^\s*(#|$)' /etc/postfix/custom/allowed_senders | tr '[:upper:]' '[:lower:]' >> /etc/postfix/allowed_senders || true
 fi
 
 postmap hash:/etc/postfix/allowed_senders
@@ -208,18 +217,24 @@ if [ -n "${TRANSPORT_MAPS}" ]; then
         if [ -n "${entry}" ]; then
             # Support both "domain.com=smtp:[mx]:25" and "domain.com smtp:[mx]:25"
             if [[ "${entry}" == *"="* ]]; then
-                dom="${entry%%=*}"
+                dom="$(echo "${entry%%=*}" | tr '[:upper:]' '[:lower:]')"
                 nexthop="${entry#*=}"
                 echo "${dom}    ${nexthop}" >> /etc/postfix/transport
             else
-                echo "${entry}" >> /etc/postfix/transport
+                dom="$(echo "${entry%%[[:space:]]*}" | tr '[:upper:]' '[:lower:]')"
+                nexthop="${entry#*[[:space:]]}"
+                echo "${dom}    ${nexthop}" >> /etc/postfix/transport
             fi
         fi
     done
 fi
 
 if [ -f /etc/postfix/custom/transport ]; then
-    grep -vE '^\s*(#|$)' /etc/postfix/custom/transport >> /etc/postfix/transport || true
+    while read -r dom nexthop rest || [ -n "${dom}" ]; do
+        [ -z "${dom}" ] && continue
+        [[ "${dom}" =~ ^# ]] && continue
+        echo "$(echo "${dom}" | tr '[:upper:]' '[:lower:]')    ${nexthop} ${rest}" >> /etc/postfix/transport
+    done < /etc/postfix/custom/transport
 fi
 
 postmap hash:/etc/postfix/transport
@@ -246,7 +261,7 @@ if [ -n "${SENDER_VIP_MAPPINGS}" ]; then
             if [ "$brace_depth" -eq 0 ]; then
                 map_item="$(echo "${raw_item}" | xargs)"
                 if [ -n "${map_item}" ]; then
-                    sender_key="${map_item%%:*}"
+                    sender_key="$(echo "${map_item%%:*}" | tr '[:upper:]' '[:lower:]')"
                     vip_target="${map_item#*:}"
                     if [[ "${vip_target}" =~ ^vip[0-9]+$ ]]; then
                         vip_target="smtp_${vip_target}:"
@@ -266,7 +281,7 @@ if [ -n "${SENDER_VIP_MAPPINGS}" ]; then
     done
     map_item="$(echo "${raw_item}" | xargs)"
     if [ -n "${map_item}" ]; then
-        sender_key="${map_item%%:*}"
+        sender_key="$(echo "${map_item%%:*}" | tr '[:upper:]' '[:lower:]')"
         vip_target="${map_item#*:}"
         if [[ "${vip_target}" =~ ^vip[0-9]+$ ]]; then
             vip_target="smtp_${vip_target}:"
@@ -278,7 +293,11 @@ if [ -n "${SENDER_VIP_MAPPINGS}" ]; then
 fi
 
 if [ -f /etc/postfix/custom/sender_vip_map ]; then
-    grep -vE '^\s*(#|$)' /etc/postfix/custom/sender_vip_map >> /etc/postfix/sender_transport || true
+    while read -r skey stgt rest || [ -n "${skey}" ]; do
+        [ -z "${skey}" ] && continue
+        [[ "${skey}" =~ ^# ]] && continue
+        echo "$(echo "${skey}" | tr '[:upper:]' '[:lower:]')    ${stgt} ${rest}" >> /etc/postfix/sender_transport
+    done < /etc/postfix/custom/sender_vip_map
 fi
 
 postmap hash:/etc/postfix/sender_transport
@@ -367,32 +386,51 @@ postconf -e "maillog_file = /var/log/mailserver/maillog"
 postconf -e "maillog_file_prefixes = /var/log"
 
 # Multi-VIP load-balancing default transport:
-# - If 2 or more VIPs: use Postfix randmap for round-robin load balancing
-# - If exactly 1 VIP: direct default transport
+# - If 2 or more VIPs: default_transport = smtp, with sender_dependent_default_transport_maps = randmap:{...}
+# - If exactly 1 VIP: direct default_transport = smtp_vip1 (no randmap)
 # - If 0 VIPs: standard postfix smtp default
 if [ "${#RESOLVED_VIP_KEYS[@]}" -gt 1 ]; then
     randmap_targets=""
     for k in "${RESOLVED_VIP_KEYS[@]}"; do
         if [ -z "${randmap_targets}" ]; then
-            randmap_targets="smtp_vip${k}"
+            randmap_targets="smtp_vip${k}:"
         else
-            randmap_targets="${randmap_targets},smtp_vip${k}"
+            randmap_targets="${randmap_targets},smtp_vip${k}:"
         fi
     done
-    log_info "Setting default_transport = randmap:{${randmap_targets}}"
-    postconf -e "default_transport = randmap:{${randmap_targets}}"
+    log_info "Multi-VIP mode (${#RESOLVED_VIP_KEYS[@]} VIPs): Setting default_transport = smtp"
+    postconf -e "default_transport = smtp"
+    if [ -s /etc/postfix/sender_transport ]; then
+        log_info "Setting sender_dependent_default_transport_maps = hash:/etc/postfix/sender_transport, randmap:{${randmap_targets}}"
+        postconf -e "sender_dependent_default_transport_maps = hash:/etc/postfix/sender_transport, randmap:{${randmap_targets}}"
+    else
+        log_info "Setting sender_dependent_default_transport_maps = randmap:{${randmap_targets}}"
+        postconf -e "sender_dependent_default_transport_maps = randmap:{${randmap_targets}}"
+    fi
+    postconf -e "smtp_connection_cache_on_demand = no"
 elif [ "${#RESOLVED_VIP_KEYS[@]}" -eq 1 ]; then
-    log_info "Setting default_transport = smtp_vip${RESOLVED_VIP_KEYS[0]}"
+    log_info "Single VIP mode: Setting default_transport = smtp_vip${RESOLVED_VIP_KEYS[0]}"
     postconf -e "default_transport = smtp_vip${RESOLVED_VIP_KEYS[0]}"
+    if [ -s /etc/postfix/sender_transport ]; then
+        postconf -e "sender_dependent_default_transport_maps = hash:/etc/postfix/sender_transport"
+    else
+        postconf -X sender_dependent_default_transport_maps || true
+    fi
 else
     log_info "No outbound VIPs configured, setting default_transport = smtp"
     postconf -e "default_transport = smtp"
+    postconf -X sender_dependent_default_transport_maps || true
 fi
 postconf -e "transport_maps = hash:/etc/postfix/transport"
-if [ -s /etc/postfix/sender_transport ]; then
-    postconf -e "sender_dependent_default_transport_maps = hash:/etc/postfix/sender_transport"
+
+# HAProxy Inbound PROXY Protocol support (send-proxy / send-proxy-v2)
+if [ "${ENABLE_HAPROXY_PROXY_PROTOCOL}" = "true" ]; then
+    log_info "Enabling HAProxy PROXY protocol (smtpd_upstream_proxy_protocol = haproxy)..."
+    postconf -e "smtpd_upstream_proxy_protocol = haproxy"
+    postconf -e "smtpd_upstream_proxy_timeout = 5s"
 else
-    postconf -X sender_dependent_default_transport_maps || true
+    postconf -X smtpd_upstream_proxy_protocol || true
+    postconf -X smtpd_upstream_proxy_timeout || true
 fi
 
 # Strict Access Controls:

@@ -1,0 +1,63 @@
+# ==============================================================================
+# HAProxy 2.x+ Configuration Example for Postfix SMTP Relay with PROXY Protocol
+# Path: /etc/haproxy/haproxy.cfg
+#
+# Purpose:
+#   Distributes incoming SMTP traffic across Postfix relay nodes while
+#   preserving the original client IP addresses via HAProxy PROXY Protocol v1/v2.
+#
+# Postfix Requirement:
+#   In .env, set:
+#     ENABLE_HAPROXY_PROXY_PROTOCOL=true
+#   This configures Postfix smtpd_upstream_proxy_protocol = haproxy so Postfix
+#   waits for the PROXY header and extracts the client IP without throwing
+#   "improper command pipelining" errors.
+# ==============================================================================
+
+global
+    log         127.0.0.1 local2 info
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon
+
+defaults
+    log                     global
+    mode                    tcp
+    option                  tcplog
+    option                  dontlognull
+    retries                 3
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+
+# ------------------------------------------------------------------------------
+# FRONTEND: Inbound SMTP listener on Port 25 (or unprivileged 2525)
+# ------------------------------------------------------------------------------
+frontend smtp_front
+    bind *:25
+    mode tcp
+    default_backend smtp_postfix_nodes
+
+# ------------------------------------------------------------------------------
+# BACKEND: Postfix Relay Nodes
+#
+# Options:
+#   send-proxy:    Sends PROXY Protocol v1 (human-readable ASCII)
+#   send-proxy-v2: Sends PROXY Protocol v2 (compact binary, Postfix 3.5+)
+#   check:         Enables periodic TCP health checking
+# ------------------------------------------------------------------------------
+backend smtp_postfix_nodes
+    mode tcp
+    balance roundrobin
+
+    # SMTP health check: verifies Postfix 220 greeting banner
+    # Note: When send-proxy is enabled on the server line, HAProxy sends
+    # the PROXY header during smtpchk health checks as well.
+    option smtpchk HELO lb.company.com
+
+    # Replace with the real backend IPs and SMTP ports of your Postfix instances
+    server postfix-node-1 10.10.10.11:2525 send-proxy check inter 5s fall 3 rise 2
+    server postfix-node-2 10.10.10.12:2525 send-proxy check inter 5s fall 3 rise 2

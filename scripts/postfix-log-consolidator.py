@@ -74,6 +74,24 @@ VIP_PROC_RE = re.compile(
 )
 
 
+def normalize_email(addr: Optional[str]) -> Optional[str]:
+    """Convert an email address to lowercase and strip whitespace."""
+    if not addr:
+        return None
+    return addr.strip().lower()
+
+
+def normalize_header_emails(val: Optional[str]) -> Optional[str]:
+    """Lowercase any email addresses contained within a header (e.g. Cc: User <User@Company.COM>)."""
+    if not val:
+        return None
+    return re.sub(
+        r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+        lambda m: m.group(0).lower(),
+        val.strip(),
+    )
+
+
 class QueueConsolidator:
     def __init__(self, output_path: str, timeout_sec: int = 300):
         self.output_path = output_path
@@ -124,18 +142,22 @@ class QueueConsolidator:
         return rec
 
     def emit_json(self, record: Dict[str, Any]) -> None:
+        from_val: Optional[str] = normalize_email(record.get("from"))
         to_val: Optional[str] = None
         if record.get("to"):
             if isinstance(record["to"], list):
                 seen = set()
                 deduped = []
                 for addr in record["to"]:
-                    if addr and addr not in seen:
-                        seen.add(addr)
-                        deduped.append(addr)
+                    clean_addr = normalize_email(addr)
+                    if clean_addr and clean_addr not in seen:
+                        seen.add(clean_addr)
+                        deduped.append(clean_addr)
                 to_val = ", ".join(deduped) if deduped else None
             else:
-                to_val = str(record["to"])
+                to_val = normalize_email(str(record["to"]))
+
+        cc_val: Optional[str] = normalize_header_emails(record.get("cc"))
 
         out = {
             "timestamp": self.now_iso(),
@@ -144,9 +166,9 @@ class QueueConsolidator:
             "queue_id": record.get("queue_id"),
             "client_ip": record.get("client_ip"),
             "client_hostname": record.get("client_hostname"),
-            "from": record.get("from"),
+            "from": from_val,
             "to": to_val,
-            "cc": record.get("cc"),
+            "cc": cc_val,
             "message_id": record.get("message_id"),
             "size": record.get("size"),
             "subject": record.get("subject"),
@@ -203,10 +225,10 @@ class QueueConsolidator:
                 rec["client_ip"] = cm.group(2)
             fm = re.search(r"from=<([^>]*)>", rest)
             if fm:
-                rec["from"] = fm.group(1)
+                rec["from"] = normalize_email(fm.group(1))
             tm = re.search(r"to=<([^>]*)>", rest)
             if tm:
-                rec["to"] = [tm.group(1)]
+                rec["to"] = [normalize_email(tm.group(1))]
             dm = re.search(r"\b([45]\.\d+\.\d+)\b", rest)
             if dm:
                 rec["dsn"] = dm.group(1)
@@ -240,7 +262,7 @@ class QueueConsolidator:
             if hname == "subject" and not rec["subject"]:
                 rec["subject"] = hval
             elif hname == "cc" and not rec["cc"]:
-                rec["cc"] = hval
+                rec["cc"] = normalize_header_emails(hval)
             elif hname == "message-id" and not rec["message_id"]:
                 rec["message_id"] = hval
 
@@ -249,22 +271,24 @@ class QueueConsolidator:
             if hm.group("cip") and not rec["client_ip"]:
                 rec["client_ip"] = hm.group("cip")
             if hm.group("env_from") and not rec["from"]:
-                rec["from"] = hm.group("env_from")
-            if hm.group("env_to") and hm.group("env_to") not in rec["to"]:
-                rec["to"].append(hm.group("env_to"))
+                rec["from"] = normalize_email(hm.group("env_from"))
+            if hm.group("env_to"):
+                lowered_to = normalize_email(hm.group("env_to"))
+                if lowered_to and lowered_to not in rec["to"]:
+                    rec["to"].append(lowered_to)
             return
 
         # 4. qmgr from/size/nrcpt
         qfm = QMGR_FROM_RE.search(rest)
         if qfm:
-            rec["from"] = qfm.group("sender")
+            rec["from"] = normalize_email(qfm.group("sender"))
             rec["size"] = int(qfm.group("size"))
             return
 
         # 5. smtp / delivery line
         dlv = DELIVERY_RE.search(rest)
         if dlv:
-            to_addr = dlv.group("to")
+            to_addr = normalize_email(dlv.group("to"))
             if to_addr and to_addr not in rec["to"]:
                 rec["to"].append(to_addr)
             rec["dsn"] = dlv.group("dsn")

@@ -170,7 +170,7 @@ OUTBOUND_VIP_2_HELO=mail2.company.com
 ```
 Postfix will automatically:
 - Create transports `smtp_vip1` and `smtp_vip2` in `master.cf`.
-- Set `default_transport = randmap:{smtp_vip1,smtp_vip2}` in `main.cf`.
+- Set `default_transport = smtp` and `sender_dependent_default_transport_maps = randmap:{smtp_vip1:,smtp_vip2:}` in `main.cf`.
 - Authorize only `10.10.10.101` and `10.10.10.102` in OpenDKIM `TrustedHosts`.
 
 ### 2. Scaling Up (e.g. 8 VIPs)
@@ -184,10 +184,10 @@ OUTBOUND_VIP_8=10.10.10.108
 OUTBOUND_VIP_8_HELO=mail8.company.com
 ```
 Postfix will automatically generate `smtp_vip1` through `smtp_vip8` and balance across all 8 VIPs:
-`randmap:{smtp_vip1,smtp_vip2,smtp_vip3,smtp_vip4,smtp_vip5,smtp_vip6,smtp_vip7,smtp_vip8}`.
+`sender_dependent_default_transport_maps = randmap:{smtp_vip1:,smtp_vip2:,smtp_vip3:,smtp_vip4:,smtp_vip5:,smtp_vip6:,smtp_vip7:,smtp_vip8:}`.
 
 ### 3. Single VIP Mode (1 VIP)
-If only `OUTBOUND_VIP_1` is defined, Postfix sets `default_transport = smtp_vip1` directly without overhead.
+If only `OUTBOUND_VIP_1` (or `OUTBOUND_VIP`) is defined, Postfix sets `default_transport = smtp_vip1` directly without `randmap`.
 
 ### 4. Keepalived Host Configuration Note
 When scaling VIPs up or down, update `/etc/keepalived/keepalived.conf` on both RHEL 9 nodes so Keepalived assigns the matching VIP addresses to the network interface:
@@ -290,3 +290,22 @@ Both log files are available inside the container at `/var/log/maillog` and `/va
    - **Google Postmaster Tools** (`postmaster.google.com`)
    - **Microsoft SNDS & JMRP** (`sendersupport.olc.protection.outlook.com/snds/`)
    - **Yahoo Sender Hub** (`senders.yahooinc.com`)
+
+---
+
+## HAProxy Deployment & PROXY Protocol
+
+When placing Postfix behind HAProxy with `send-proxy` (or `send-proxy-v2`) to preserve the original client IP address, enable the proxy protocol in `.env`:
+```ini
+ENABLE_HAPROXY_PROXY_PROTOCOL=true
+```
+
+This sets `smtpd_upstream_proxy_protocol = haproxy` and `smtpd_upstream_proxy_timeout = 5s` in Postfix `main.cf`. This ensures Postfix waits for the PROXY header before sending the `220` SMTP banner, eliminating `improper command pipelining` errors and allowing access control checks (`mynetworks`) and loggers to see the actual client IP.
+
+See [config/haproxy.cfg.example](file:///home/mbattle/mailserver/config/haproxy.cfg.example) for a complete HAProxy configuration example.
+
+---
+
+## Consolidated Log Lowercase Email Normalization
+
+The Queue-ID log consolidator daemon (`postfix-log-consolidator.py`) automatically normalizes all email addresses (`from`, `to`, `cc`) to lowercase when writing JSON records to `/var/log/postfix-consolidate.log`. Multiple recipients are deduplicated case-insensitively, ensuring consistent and predictable queries for analytics and SIEM indexing.

@@ -95,6 +95,14 @@ EOF
                 fi
             done
         else
+            # Check for singular OUTBOUND_VIP alias for OUTBOUND_VIP_1
+            if [ -n "${OUTBOUND_VIP:-}" ] && [ -z "${OUTBOUND_VIP_1:-}" ]; then
+                OUTBOUND_VIP_1="${OUTBOUND_VIP}"
+            fi
+            if [ -n "${OUTBOUND_VIP_HELO:-}" ] && [ -z "${OUTBOUND_VIP_1_HELO:-}" ]; then
+                OUTBOUND_VIP_1_HELO="${OUTBOUND_VIP_HELO}"
+            fi
+
             found_vip=0
             for i in $(seq 1 100); do
                 var_name="OUTBOUND_VIP_${i}"
@@ -141,7 +149,7 @@ EOF
                     if [ "$brace_depth" -eq 0 ]; then
                         map_item="$(echo "${raw_item}" | xargs)"
                         if [ -n "${map_item}" ]; then
-                            sender_key="${map_item%%:*}"
+                            sender_key="$(echo "${map_item%%:*}" | tr '[:upper:]' '[:lower:]')"
                             vip_target="${map_item#*:}"
                             if [[ "${vip_target}" =~ ^vip[0-9]+$ ]]; then
                                 vip_target="smtp_${vip_target}:"
@@ -161,7 +169,7 @@ EOF
             done
             map_item="$(echo "${raw_item}" | xargs)"
             if [ -n "${map_item}" ]; then
-                sender_key="${map_item%%:*}"
+                sender_key="$(echo "${map_item%%:*}" | tr '[:upper:]' '[:lower:]')"
                 vip_target="${map_item#*:}"
                 if [[ "${vip_target}" =~ ^vip[0-9]+$ ]]; then
                     vip_target="smtp_${vip_target}:"
@@ -189,21 +197,35 @@ EOF
             echo "# === END MULTI-VIP TRANSPORTS ==="
         } >> "${MOCK_ROOT}/etc/postfix/master.cf"
 
-        # 8. main.cf Default Transport
+        # 8. main.cf Default Transport & Proxy Protocol
         if [ "${#RESOLVED_VIP_KEYS[@]}" -gt 1 ]; then
             randmap_targets=""
             for k in "${RESOLVED_VIP_KEYS[@]}"; do
                 if [ -z "${randmap_targets}" ]; then
-                    randmap_targets="smtp_vip${k}"
+                    randmap_targets="smtp_vip${k}:"
                 else
-                    randmap_targets="${randmap_targets},smtp_vip${k}"
+                    randmap_targets="${randmap_targets},smtp_vip${k}:"
                 fi
             done
-            postconf -e "default_transport = randmap:{${randmap_targets}}"
+            postconf -e "default_transport = smtp"
+            if [ -s "${MOCK_ROOT}/etc/postfix/sender_transport" ]; then
+                postconf -e "sender_dependent_default_transport_maps = hash:/etc/postfix/sender_transport, randmap:{${randmap_targets}}"
+            else
+                postconf -e "sender_dependent_default_transport_maps = randmap:{${randmap_targets}}"
+            fi
+            postconf -e "smtp_connection_cache_on_demand = no"
         elif [ "${#RESOLVED_VIP_KEYS[@]}" -eq 1 ]; then
             postconf -e "default_transport = smtp_vip${RESOLVED_VIP_KEYS[0]}"
+            if [ -s "${MOCK_ROOT}/etc/postfix/sender_transport" ]; then
+                postconf -e "sender_dependent_default_transport_maps = hash:/etc/postfix/sender_transport"
+            fi
         else
             postconf -e "default_transport = smtp"
+        fi
+
+        if [ "${ENABLE_HAPROXY_PROXY_PROTOCOL:-false}" = "true" ]; then
+            postconf -e "smtpd_upstream_proxy_protocol = haproxy"
+            postconf -e "smtpd_upstream_proxy_timeout = 5s"
         fi
 
         # 9. OpenDKIM TrustedHosts
@@ -232,10 +254,11 @@ echo "Test 1: Backward Compatibility (zero VIP env vars provided)..."
 MOCK_T1="${TEST_DIR}/test1"
 run_vip_resolution_harness "${MOCK_T1}"
 
-if grep -q "default_transport = randmap:{smtp_vip1,smtp_vip2,smtp_vip3,smtp_vip4,smtp_vip5}" "${MOCK_T1}/postconf.record"; then
-    pass "main.cf configured with 5-VIP randmap"
+if grep -q "default_transport = smtp" "${MOCK_T1}/postconf.record" && \
+   grep -q "sender_dependent_default_transport_maps = randmap:{smtp_vip1:,smtp_vip2:,smtp_vip3:,smtp_vip4:,smtp_vip5:}" "${MOCK_T1}/postconf.record"; then
+    pass "main.cf configured with 5-VIP randmap in sender_dependent_default_transport_maps"
 else
-    fail "main.cf missing expected 5-VIP randmap"
+    fail "main.cf missing expected 5-VIP randmap in sender_dependent_default_transport_maps"
 fi
 
 if [ "$(grep -c '^smtp_vip[0-9]\+ unix' "${MOCK_T1}/etc/postfix/master.cf")" -eq 5 ]; then
@@ -262,8 +285,9 @@ OUTBOUND_VIP_2="10.10.10.102" \
 OUTBOUND_VIP_2_HELO="mail2.company.com" \
 run_vip_resolution_harness "${MOCK_T2}"
 
-if grep -q "default_transport = randmap:{smtp_vip1,smtp_vip2}" "${MOCK_T2}/postconf.record"; then
-    pass "main.cf configured with exactly 2-VIP randmap: randmap:{smtp_vip1,smtp_vip2}"
+if grep -q "default_transport = smtp" "${MOCK_T2}/postconf.record" && \
+   grep -q "sender_dependent_default_transport_maps = randmap:{smtp_vip1:,smtp_vip2:}" "${MOCK_T2}/postconf.record"; then
+    pass "main.cf configured with exactly 2-VIP randmap: randmap:{smtp_vip1:,smtp_vip2:}"
 else
     fail "main.cf randmap mismatch for 2 VIPs"
 fi
@@ -297,7 +321,8 @@ OUTBOUND_VIP_7="10.10.10.107" \
 OUTBOUND_VIP_8="10.10.10.108" \
 run_vip_resolution_harness "${MOCK_T3}"
 
-if grep -q "default_transport = randmap:{smtp_vip1,smtp_vip2,smtp_vip3,smtp_vip4,smtp_vip5,smtp_vip6,smtp_vip7,smtp_vip8}" "${MOCK_T3}/postconf.record"; then
+if grep -q "default_transport = smtp" "${MOCK_T3}/postconf.record" && \
+   grep -q "sender_dependent_default_transport_maps = randmap:{smtp_vip1:,smtp_vip2:,smtp_vip3:,smtp_vip4:,smtp_vip5:,smtp_vip6:,smtp_vip7:,smtp_vip8:}" "${MOCK_T3}/postconf.record"; then
     pass "main.cf configured with 8-VIP randmap"
 else
     fail "main.cf randmap mismatch for 8 VIPs"
@@ -347,7 +372,8 @@ MOCK_T5="${TEST_DIR}/test5"
 OUTBOUND_VIPS="192.168.1.101,192.168.1.102:custom.helo.com,192.168.1.103" \
 run_vip_resolution_harness "${MOCK_T5}"
 
-if grep -q "default_transport = randmap:{smtp_vip1,smtp_vip2,smtp_vip3}" "${MOCK_T5}/postconf.record"; then
+if grep -q "default_transport = smtp" "${MOCK_T5}/postconf.record" && \
+   grep -q "sender_dependent_default_transport_maps = randmap:{smtp_vip1:,smtp_vip2:,smtp_vip3:}" "${MOCK_T5}/postconf.record"; then
     pass "main.cf configured with 3-VIP randmap from list syntax"
 else
     fail "main.cf randmap mismatch from list syntax"
@@ -387,6 +413,45 @@ if grep -q "bulk@company.com    randmap:{smtp_vip1,smtp_vip7}" "${MOCK_T6}/etc/p
     pass "sender_transport preserved multi-vip randmap subset"
 else
     fail "sender_transport failed to preserve randmap subset"
+fi
+
+# ------------------------------------------------------------------------------
+# Test 7: Singular OUTBOUND_VIP alias for single VIP mode
+# ------------------------------------------------------------------------------
+echo ""
+echo "Test 7: Singular OUTBOUND_VIP alias for single VIP mode..."
+MOCK_T7="${TEST_DIR}/test7"
+OUTBOUND_VIP="10.10.10.101" \
+OUTBOUND_VIP_HELO="single.company.com" \
+run_vip_resolution_harness "${MOCK_T7}"
+
+if grep -q "default_transport = smtp_vip1" "${MOCK_T7}/postconf.record"; then
+    pass "OUTBOUND_VIP alias configured single VIP default_transport = smtp_vip1"
+else
+    fail "OUTBOUND_VIP alias failed to configure single VIP transport"
+fi
+
+if [ "$(grep -c '^smtp_vip[0-9]\+ unix' "${MOCK_T7}/etc/postfix/master.cf")" -eq 1 ]; then
+    pass "OUTBOUND_VIP produced exactly 1 master.cf transport"
+else
+    fail "OUTBOUND_VIP produced incorrect transport count"
+fi
+
+# ------------------------------------------------------------------------------
+# Test 8: HAProxy Inbound PROXY Protocol Configuration
+# ------------------------------------------------------------------------------
+echo ""
+echo "Test 8: HAProxy Inbound PROXY Protocol Configuration..."
+MOCK_T8="${TEST_DIR}/test8"
+ENABLE_HAPROXY_PROXY_PROTOCOL="true" \
+OUTBOUND_VIP_1="10.10.10.101" \
+run_vip_resolution_harness "${MOCK_T8}"
+
+if grep -q "smtpd_upstream_proxy_protocol = haproxy" "${MOCK_T8}/postconf.record" && \
+   grep -q "smtpd_upstream_proxy_timeout = 5s" "${MOCK_T8}/postconf.record"; then
+    pass "ENABLE_HAPROXY_PROXY_PROTOCOL=true properly sets smtpd_upstream_proxy_protocol = haproxy"
+else
+    fail "ENABLE_HAPROXY_PROXY_PROTOCOL=true failed to set proxy protocol parameter"
 fi
 
 echo "================================================================================"
